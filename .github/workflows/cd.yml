@@ -1,0 +1,116 @@
+name: CD — Build & Deploy to EKS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/app/**"
+      - "helm/**"
+      - ".github/workflows/cd.yml"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: my-app-ecr
+  EKS_CLUSTER_NAME: dev-eks-cluster
+  HELM_RELEASE: title-checker
+  HELM_CHART: ./helm/title-checker
+  NAMESPACE: default
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker image to ECR
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+      ecr-registry: ${{ steps.login-ecr.outputs.registry }}
+
+    permissions:
+      id-token: write   # Потрібно для OIDC
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image tag
+        id: meta
+        run: echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: infra/app
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to EKS via Helm
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production   # Manual approval у GitHub Environments
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "3.14.0"
+
+      - name: Helm upgrade / install
+        run: |
+          helm upgrade --install ${{ env.HELM_RELEASE }} ${{ env.HELM_CHART }} \
+            --namespace ${{ env.NAMESPACE }} \
+            --create-namespace \
+            --set image.repository=${{ needs.build-and-push.outputs.ecr-registry }}/${{ env.ECR_REPOSITORY }} \
+            --set image.tag=${{ needs.build-and-push.outputs.image-tag }} \
+            --set image.pullPolicy=Always \
+            --wait \
+            --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/${{ env.HELM_RELEASE }} \
+            --namespace ${{ env.NAMESPACE }} \
+            --timeout=3m
+          kubectl get pods -n ${{ env.NAMESPACE }}
+
+      - name: Get ALB URL
+        run: |
+          echo "=== Ingress URL ==="
+          kubectl get ingress -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.items[*].status.loadBalancer.ingress[*].hostname}'

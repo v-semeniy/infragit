@@ -19,9 +19,10 @@
 Повністю автоматизована інфраструктура AWS для розгортання **Python Flask застосунку** (Title Checker WebApp) з використанням:
 - **Infrastructure as Code**: Terraform
 - **Containerization**: Docker + ECR
-- **CI/CD**: GitLab CI/CD
-- **Auto Scaling**: AWS Auto Scaling Groups
-- **Load Balancing**: Application Load Balancer
+- **CI/CD**: GitHub Actions (OIDC, без довгострокових ключів)
+- **Orchestration**: AWS EKS + Helm
+- **Auto Scaling**: HorizontalPodAutoscaler (HPA)
+- **Load Balancing**: Application Load Balancer (AWS LB Controller)
 - **Database**: RDS MySQL
 - **Remote Management**: AWS Systems Manager (SSM)
 
@@ -260,43 +261,85 @@ target_value = 50.0  # CPU 50%
 
 ## CI/CD Pipeline
 
+> Pipeline повністю переведено на **GitHub Actions** з OIDC-аутентифікацією (без довгострокових AWS ключів).
+
 ### Архітектура Pipeline
 
 ```mermaid
 graph LR
-    A[Git Push] --> B[GitLab Runner]
-    B --> C[Terraform Plan]
-    C --> D[Terraform Apply]
-    D --> E[Docker Build]
-    E --> F[Push to ECR]
-    F --> G[SSM Deploy]
+    A[Git Push / PR] --> B[GitHub Actions]
+    B --> C{Тип події}
+    C -->|PR| D[CI: Lint + Validate + Helm lint]
+    C -->|push main| E[Terraform Plan + Apply]
+    C -->|push main| F[Docker Build → ECR]
+    F --> G[Helm upgrade → EKS]
     G --> H[Health Check]
 ```
 
-### Stages (.gitlab-ci.yml)
+### Workflows (.github/workflows/)
 
-1. **plan** - Terraform plan
-2. **apply** - Terraform apply (manual на main)
-3. **pre_build** - ECR login
-4. **build** - Docker build + push
-5. **deploy** - SSM send-command
+| Файл | Тригер | Що робить |
+|------|--------|-----------|
+| `ci.yml` | PR / push main | Terraform fmt/validate, Docker build, Python lint, Helm lint |
+| `terraform.yml` | push `infra/**` | Plan (з коментарем у PR) → Apply (manual approval) |
+| `cd.yml` | push `infra/app/**` або `helm/**` | Build & push ECR → Helm upgrade EKS |
+
+### 🔐 Необхідні GitHub Secrets
+
+Додай у **Settings → Secrets and variables → Actions**:
+
+| Secret | Опис |
+|--------|------|
+| `AWS_ROLE_ARN` | ARN IAM ролі для GitHub OIDC, напр. `arn:aws:iam::412381736597:role/github-actions-role` |
+| `TF_STATE_BUCKET` | S3 бакет для Terraform state, напр. `bucket123ultra` |
+| `TF_LOCK_TABLE` | DynamoDB таблиця для state locking, напр. `terraform-lock-table` |
+| `DB_PASSWORD` | Пароль до RDS |
+
+### 🏗 Налаштування OIDC (одноразово)
+
+```bash
+# 1. Додати GitHub як OIDC Provider у AWS IAM
+# (вже є у setup/oidc.tf — запусти його)
+cd setup
+terraform init && terraform apply
+
+# 2. Створити IAM роль з довірою до GitHub
+# Trust Policy (приклад — адаптуй під свій repo):
+```
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::412381736597:oidc-provider/token.actions.githubusercontent.com" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": "repo:v-semeniy/infragit:*"
+      }
+    }
+  }]
+}
+```
 
 ### Приклад використання
 
 ```bash
-# 1. Зробіть зміни у коді
+# 1. Зміни в застосунку → автоматичний CI/CD деплой
 vim infra/app/title_checker.py
+git add . && git commit -m "feat: нова функція" && git push origin main
 
-# 2. Commit + Push
-git add .
-git commit -m "feat: додано нову функцію"
-git push origin main
+# Pipeline автоматично:
+#   CI:  перевірить Terraform fmt, Docker build, Helm lint
+#   CD:  збудує новий образ → push ECR → helm upgrade → EKS rolling update
 
-# 3. Pipeline автоматично:
-#    - Збудує новий Docker образ
-#    - Push у ECR з тегами: ${CI_COMMIT_SHA} + latest
-#    - Виконає SSM deploy на всі EC2
-#    - ASG поступово замінить інстанси (rolling update)
+# 2. Зміни в інфраструктурі → Terraform workflow
+vim infra/eks.tf
+git add . && git commit -m "infra: оновлення EKS node group" && git push origin main
+
+# Terraform Plan покаже diff у PR-коментарі
+# Apply відбудеться після manual approval (GitHub Environment: production)
 ```
 
 ---
