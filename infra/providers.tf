@@ -1,0 +1,60 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+  }
+}
+
+# Configure the AWS Provider
+provider "aws" {
+  region = "us-east-1"
+}
+
+# Kubernetes provider — підключається до EKS після його створення
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name]
+  }
+}
+
+# Автоматично отримує AWS Account ID
+data "aws_caller_identity" "current" {}
+
+# variable "aws_region" {
+#   default = "us-east-1"
+# }
+
+# variable "instance_type" {
+#   default = "t2.micro"
+# }
+
+# variable "db_name" {
+#   default = "appdb"
+# }
+
+# variable "db_username" {
+#   default = "admin"
+# }
+
+# variable "db_password" {
+#   default = "SecurePassword123!"
+# }
+
+# variable "environment" {
+#   default = "dev"
+# }

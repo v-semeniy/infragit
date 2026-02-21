@@ -1,0 +1,12 @@
+apiVersion: v2
+name: title-checker
+description: Helm chart для деплою застосунку title-checker на EKS
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - title-checker
+  - python
+  - streamlit
+maintainers:
+  - name: vsemeniy
